@@ -1,13 +1,12 @@
 from flask_blog import app
-from flask import render_template, redirect, flash, url_for, session, request
-from blog.form import SetupForm, PostForm
+from flask import render_template, redirect, flash, url_for, session, abort, request
+from blog.form import SetupForm, PostForm, CommentForm
 from flask_blog import db, uploaded_images
 from author.models import Author
-from blog.models import Blog, Post, Category
+from blog.models import Blog, Post, Category, Comment
 from author.decorators import login_required, author_required
 import bcrypt
 from slugify import slugify
-from flask_uploads.uploads import UploadNotAllowed
 
 POSTS_PER_PAGE = 5
 
@@ -16,23 +15,26 @@ POSTS_PER_PAGE = 5
 @app.route('/index/<int:page>')
 def index(page=1):
     blog = Blog.query.first()
+    if not blog:
+        return redirect(url_for('setup'))
     posts = Post.query.filter_by(live=True).order_by(Post.publish_date.desc()).paginate(page, POSTS_PER_PAGE, False)
     return render_template('blog/index.html', blog=blog, posts=posts)
-
+    
 @app.route('/admin')
 @app.route('/admin/<int:page>')
-@login_required
 @author_required
 def admin(page=1):
-    posts = Post.query.order_by(Post.publish_date.desc()).paginate(page, POSTS_PER_PAGE, False)
-    return render_template('blog/admin.html', posts=posts)
-
-@app.route('/setup', methods=('GET', 'POST'))
+    if session.get('is_author'):
+        posts = Post.query.order_by(Post.publish_date.desc()).paginate(page, POSTS_PER_PAGE, False)
+        return render_template('blog/admin.html', posts=posts)
+    else:
+        return redirect(url_for('index'))
+        # abort(403)
+    
+@app.route('/setup', methods=("GET", "POST"))
 def setup():
-    blogs = Blog.query.count()
-    if blogs:
-        return redirect(url_for('admin'))
     form = SetupForm()
+    error = ""
     if form.validate_on_submit():
         salt = bcrypt.gensalt()
         hashed_password = bcrypt.hashpw(form.password.data, salt)
@@ -42,11 +44,14 @@ def setup():
             form.username.data,
             hashed_password,
             True
-        )
+            )
         db.session.add(author)
         db.session.flush()
         if author.id:
-            blog = Blog(form.name.data, author.id)
+            blog = Blog(
+                form.name.data,
+                author.id
+                )
             db.session.add(blog)
             db.session.flush()
         else:
@@ -54,13 +59,14 @@ def setup():
             error = "Error creating user"
         if author.id and blog.id:
             db.session.commit()
-        else:
+            flash("Blog created")
+            return redirect(url_for('index'))
+        else: 
             db.session.rollback()
             error = "Error creating blog"
-        flash('Blog created')
-        return redirect('/admin')
+        
     return render_template('blog/setup.html', form=form)
-
+    
 @app.route('/post', methods=('GET', 'POST'))
 @author_required
 def post():
@@ -77,10 +83,13 @@ def post():
             db.session.add(new_category)
             db.session.flush()
             category = new_category
+        elif form.category.data:
+            category_id = form.category.get_pk(form.category.data)
+            category= Category.query.filter_by(id=category_id).first()
         else:
-            category = form.category.data
+            category = None
         blog = Blog.query.first()
-        author = Author.query.filter_by(username=session['username']).first()
+        author = Author.query.filter_by(username= session['username']).first()
         title = form.title.data
         body = form.body.data
         slug = slugify(title)
@@ -88,14 +97,31 @@ def post():
         db.session.add(post)
         db.session.commit()
         return redirect(url_for('article', slug=slug))
-    return render_template('blog/post.html', form=form, action="new")
-    
-@app.route('/article/<slug>')
+    return render_template('blog/post.html', form=form, action = "new")
+
+@app.route('/article', methods=('GET', 'POST'))    
+@app.route('/article/<slug>', methods=('GET', 'POST'))
 def article(slug):
-    post = Post.query.filter_by(slug=slug).first_or_404()
-    return render_template('blog/article.html', post=post)
-    
-@app.route('/edit/<int:post_id>', methods=('GET', 'POST'))
+    user_logged = False
+    if session.get('username'):
+        print('Yes, there is a user logged')
+        user_logged = True
+    form = CommentForm()
+    if form.validate_on_submit():
+        blog = Blog.query.first()
+        post = Post.query.filter_by(slug=slug).first_or_404()
+        author = Author.query.filter_by(username=session['username']).first()
+        username = session['username']
+        body = form.body.data
+        comment = Comment(blog, post, author, username, body)
+        db.session.add(comment)
+        db.session.commit()
+        flash("Comment posted.")
+        return redirect(url_for('article', slug = post.slug))
+    post = Post.query.filter_by(slug = slug).first_or_404()
+    return render_template('blog/article.html', form=form, post=post)
+
+@app.route('/edit/<int:post_id>', methods=("GET","POST"))
 @author_required
 def edit(post_id):
     post = Post.query.filter_by(id=post_id).first_or_404()
@@ -119,14 +145,15 @@ def edit(post_id):
             db.session.flush()
             post.category = new_category
         db.session.commit()
-        return redirect(url_for('article', slug=post.slug))
-    return render_template('blog/post.html', form=form, post=post, action="edit")
-
+        return redirect(url_for('article', slug = post.slug))
+    return render_template('blog/post.html', form=form, post=post, action='edit')
+    
 @app.route('/delete/<int:post_id>')
 @author_required
 def delete(post_id):
-    post = Post.query.filter_by(id=post_id).first_or_404()
-    post.live = False
+    post= Post.query.filter_by(id=post_id).first_or_404()
+    post.live=False
     db.session.commit()
     flash("Article deleted")
     return redirect('/admin')
+    
